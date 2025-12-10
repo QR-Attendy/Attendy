@@ -18,13 +18,15 @@ contextBridge.exposeInMainWorld("attendyAPI", {
 
 
   // will Create user then we shiball the QR Generator at the dashboard
-  async createUser(fullname, username, role) {
+  async createUser(fullname, username, role, section) {
+    const body = { fullname, username, role };
+    if (typeof section !== 'undefined' && section !== null) body.section = section;
     const res = await fetch("http://localhost:5005/create_user", {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({ fullname, username, role })
+      body: JSON.stringify(body)
     });
 
     return await res.json(); // returns user + QR base64

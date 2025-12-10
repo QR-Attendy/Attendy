@@ -30,6 +30,7 @@ def init_db():
             fullname TEXT NOT NULL,
             username TEXT NOT NULL UNIQUE,
             role TEXT NOT NULL,
+            section TEXT,
             status TEXT DEFAULT 'Present',
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
@@ -40,6 +41,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             student_username TEXT NOT NULL,
             student_fullname TEXT NOT NULL,
+            student_section TEXT,
             role TEXT,
             status TEXT DEFAULT 'Present',
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -56,6 +58,17 @@ def init_db():
             c.execute("ALTER TABLE attendance ADD COLUMN time_in DATETIME")
         if 'time_out' not in cols:
             c.execute("ALTER TABLE attendance ADD COLUMN time_out DATETIME")
+        if 'student_section' not in cols:
+            c.execute("ALTER TABLE attendance ADD COLUMN student_section TEXT")
+        # ensure users table has section column
+        c.execute("PRAGMA table_info(users)")
+        ucols = [r[1] for r in c.fetchall()]
+        if 'section' not in ucols:
+            try:
+                c.execute("ALTER TABLE users ADD COLUMN section TEXT")
+            except Exception:
+                # Some older SQLite builds may not allow multiple simultaneous alters — ignore
+                pass
         conn.commit()
     except Exception as e:
         app.logger.info('init_db: could not ensure time_in/time_out columns: %s', e)
@@ -66,8 +79,10 @@ init_db()
 # ---------------------------------
 # QR Generator
 # ---------------------------------
-def generate_qr(fullname, username, role, logo_path=None):
+def generate_qr(fullname, username, role, section=None, logo_path=None):
     payload = {"fullname": fullname, "username": username, "role": role}
+    if section:
+        payload['section'] = section
 
     qr = qrcode.QRCode(
         version=None,
@@ -111,6 +126,7 @@ def create_user():
         fullname = data.get("fullname", "").strip()
         username = data.get("username", "").strip().lower()
         role = data.get("role", "").strip()
+        section = data.get("section", "").strip()
 
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
@@ -125,18 +141,18 @@ def create_user():
         existing = c.fetchone()
 
         if not existing:
-            c.execute("INSERT INTO users(fullname, username, role) VALUES (?,?,?)",
-                      (fullname, username, role))
+            c.execute("INSERT INTO users(fullname, username, role, section) VALUES (?,?,?,?)",
+                      (fullname, username, role, section))
             conn.commit()
-            c.execute("SELECT * FROM users WHERE username = ?", (username,))
-            user = c.fetchone()
-        else:
-            user = existing
+
+        # fetch canonical user columns (named order) so callers get consistent indices
+        c.execute("SELECT id, fullname, username, role, section FROM users WHERE username = ?", (username,))
+        user = c.fetchone()
 
         conn.close()
 
         # Auto-generate QR on registration
-        qr_b64 = generate_qr(fullname, username, role)
+        qr_b64 = generate_qr(fullname, username, role, section)
 
         return jsonify({
             "status": "ok",
@@ -144,6 +160,7 @@ def create_user():
             "fullname": user[1],
             "username": user[2],
             "role": user[3],
+            "section": user[4] if len(user) > 4 else None,
             "qr_base64": qr_b64
         })
 
@@ -197,9 +214,10 @@ def qr_api():
         fullname = data["fullname"]
         username = data["username"]
         role = data["role"]
+        section = data.get("section", None)
         logo_path = data.get("logo_path", None)
 
-        qr_b64 = generate_qr(fullname, username, role, logo_path)
+        qr_b64 = generate_qr(fullname, username, role, section, logo_path)
 
         return jsonify({
             "status": "ok",
@@ -217,6 +235,7 @@ def record_attendance():
     fullname = data["fullname"]
     username = data["username"]
     role = data["role"]
+    section = data.get('section')
     time_in = data.get('time_in')
     # Normalize username before storing so matching/deletion is consistent
     try:
@@ -231,10 +250,11 @@ def record_attendance():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
+    # store student_section when provided so UI can display Section instead of username
     c.execute("""
-        INSERT INTO attendance (student_username, student_fullname, role, time_in)
-        VALUES (?, ?, ?, ?)
-    """, (uname, fullname, role, time_in))
+        INSERT INTO attendance (student_username, student_fullname, student_section, role, time_in)
+        VALUES (?, ?, ?, ?, ?)
+    """, (uname, fullname, section, role, time_in))
     # Explicitly set timestamp to server's current local time (ISO 8601)
     try:
         inserted_id = c.lastrowid
@@ -273,10 +293,11 @@ def get_attendance():
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute("SELECT * FROM attendance")
+        # Explicitly select columns by name to avoid issues when ALTER TABLE changed column ordering
+        c.execute("SELECT id, student_username, student_fullname, student_section, role, status, timestamp, time_in, time_out FROM attendance")
         rows = [
-            {"id": r[0], "student_username": r[1], "student_fullname": r[2], "role": r[3],
-             "status": r[4], "timestamp": r[5], "time_in": r[6] if len(r) > 6 else None, "time_out": r[7] if len(r) > 7 else None} for r in c.fetchall()
+            {"id": r[0], "student_username": r[1], "student_fullname": r[2], "student_section": r[3],
+             "role": r[4], "status": r[5], "timestamp": r[6], "time_in": r[7], "time_out": r[8]} for r in c.fetchall()
         ]
         conn.close()
         return jsonify(rows)
